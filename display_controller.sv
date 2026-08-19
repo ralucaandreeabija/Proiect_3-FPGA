@@ -3,13 +3,13 @@
 module display_controller(
     input logic clk,
     
-    // Counter (dreapta - 4 digi?i)
+    // Counter (dreapta - 4 digiti)
     input logic [3:0] cnt0,
     input logic [3:0] cnt1,
     input logic [3:0] cnt2,
     input logic [3:0] cnt3,
     
-    // Temperatur? (stânga - 4 digi?i)
+    // Temperatur? (stânga - 4 digiti)
     input logic [3:0] tmp0,   // 'C'
     input logic [3:0] tmp1,   // zecimale
     input logic [3:0] tmp2,   // unit??i
@@ -33,52 +33,80 @@ module display_controller(
 
     assign digit_select = refresh_counter[15:13];
 
-    // Selectare digi? + anod + punct (tot pe clock)
+    // Selectare digit + anod + punct (tot pe clock)
     always @(posedge clk) begin
-        current_dp <= 1'b0;
 
+        // DP este active-low:
+        // 1 = stins
+        // 0 = aprins
+        current_dp <= 1'b1;
+    
         case (digit_select)
-            // DREAPTA (Counter) 
+    
+            // DREAPTA
             3'd0: begin
                 an <= 8'b11111110;
                 current_digit <= cnt0;
+                current_dp <= 1'b1;
             end
+    
             3'd1: begin
                 an <= 8'b11111101;
                 current_digit <= cnt1;
+                current_dp <= 1'b1;
             end
+    
             3'd2: begin
                 an <= 8'b11111011;
                 current_digit <= cnt2;
+                current_dp <= 1'b1;
             end
+    
             3'd3: begin
                 an <= 8'b11110111;
                 current_digit <= cnt3;
+                current_dp <= 1'b1;
             end
-
-            // STÂNGA (Temperatur?)
+    
+    
+            // STANGA - TEMPERATURA
+    
+            // C
             3'd4: begin
                 an <= 8'b11101111;
-                current_digit <= tmp0;      // C
+                current_digit <= tmp0;
+                current_dp <= 1'b1;
             end
+    
+            // zecimi
             3'd5: begin
                 an <= 8'b11011111;
-                current_digit <= tmp1;      // zecimale
+                current_digit <= tmp1;
+                current_dp <= 1'b1;
             end
+    
+            // unitati
             3'd6: begin
                 an <= 8'b10111111;
-                current_digit <= tmp2;      // unit??i
-                current_dp <= dp;           // punct
+                current_digit <= tmp2;
+    
+                // DP aprins dupa unitati
+                current_dp <= dp;
             end
+    
+            // zeci
             3'd7: begin
                 an <= 8'b01111111;
-                current_digit <= tmp3;      // zeci
+                current_digit <= tmp3;
+                current_dp <= 1'b1;
             end
-
+    
             default: begin
                 an <= 8'b11111111;
                 current_digit <= 4'd0;
+                current_dp <= 1'b1;
             end
+    
         endcase
     end
 

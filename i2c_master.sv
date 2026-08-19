@@ -1,269 +1,542 @@
 `timescale 1ns / 1ps
 
 module i2c_master #(
-    parameter int CLK_FREQ = 100_000_000,   // clock sistem
-    parameter int I2C_FREQ = 100_000        // 100 kHz standard
+    parameter int CLK_FREQ = 100_000_000,
+    parameter int I2C_FREQ = 100_000
 )(
-    input logic clk,
+    input  logic clk,
     input logic reset,
-    
-    // Comenzi
-    input logic enable,
-    input logic rw, // 1=Read, 0=Write
 
-    // Date
+    // Pornire tranzactie
+    input logic enable,
+
+    // Adresa slave-ului, 7 biti
     input logic [6:0] addr,
-    input logic [7:0] data_in,
-    output logic [7:0] data_out,
-    input logic [3:0] num_bytes,      // câte bytes (1 sau 2 pentru temperatur?)
-    
+
+    // Registrul care trebuie citit
+    input logic [7:0] reg_addr,
+
+    // Date pentru WRITE
+    input logic [15:0] data_in,
+
+    // Date citite
+    // ADT7420 -> 2 bytes: MSB + LSB
+    output logic [15:0] data_out,
+
+    // 1 = READ
+    // 0 = WRITE
+    input logic rw,
+
     // Status
     output logic busy,
     output logic done,
     output logic ack_error,
-    
+
+    // Debug ACK
+    // 00 = niciun ACK
+    // 01 = ACK adresa WRITE
+    // 10 = ACK registru
+    // 11 = ACK adresa READ
+    output logic [1:0] ack_debug,
+
     // I2C
-    input logic sda,
-    output logic scl
-    );
-    
-// generare clock 4× I2C (4 faze pe bit)
-localparam integer DIV = CLK_FREQ / (I2C_FREQ * 4);
+    inout wire sda,
+    inout wire scl
+);
 
-logic [15:0] clk_cnt;
-logic scl_clk; // 4× frecven?a I2C
+    // CLOCK DIVIDER
+    // 100 MHz / (100 kHz * 4) = 250
+    // Un i2c_tick apare la fiecare 250 cicluri de clk
 
-always @(posedge clk) begin
-    if (reset) begin
-        clk_cnt <= 16'd0;
-        scl_clk <= 1'b0;
-    end 
-    else if (clk_cnt == DIV-1) begin
-        clk_cnt <= 16'd0;
-        scl_clk <= ~scl_clk;
-    end 
-    else begin
-        clk_cnt <= clk_cnt + 1;
+    localparam integer DIV = CLK_FREQ / (I2C_FREQ * 4);
+
+    logic [15:0] clk_cnt;
+    logic i2c_tick;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            clk_cnt  <= 16'd0;
+            i2c_tick <= 1'b0;
+        end
+        else begin
+            if (clk_cnt == DIV - 1) begin
+                clk_cnt  <= 16'd0;
+                i2c_tick <= 1'b1;
+            end
+            else begin
+                clk_cnt  <= clk_cnt + 1'b1;
+                i2c_tick <= 1'b0;
+            end
+        end
     end
-end 
-       
-typedef enum logic [3:0] {
-    IDLE,        // A?teapt? semnalul start. Magistrala este liber? (SCL ?i SDA high).
-    START,       // Genereaz? condi?ia de START: SDA trece din high în low cât timp SCL este high.
-    ADDR,        // Trimite pe magistral? adresa slave-ului (7 bi?i) + bitul R/W.
-    ACK_ADDR,    // Elibereaz? SDA ?i cite?te ACK-ul de la slave dup? trimiterea adresei.
-    WRITE_DATA,  // Trimite un byte de date c?tre slave (bit cu bit).
-    ACK_WRITE,   // Elibereaz? SDA ?i cite?te ACK-ul de la slave dup? scrierea unui byte.
-    RESTART,     // Genereaz? Repeated START (folosit de obicei la citire dup? scrierea pointerului).
-    READ_DATA,   // Cite?te un byte de date de la slave (bit cu bit).
-    ACK_READ,    // Masterul trimite ACK (SDA=0) pentru a cere urm?torul byte.
-    NACK,        // Masterul trimite NACK (SDA=1) pentru a semnala c? a citit ultimul byte.
-    STOP,        // Genereaz? condi?ia de STOP: SDA trece din low în high cât timp SCL este high.
-    DONE_ST      // Tranzac?ia s-a terminat. Seteaz? done=1, busy=0 ?i trece în IDLE.
-} i2c_state_t;
 
-i2c_state_t i2c_state;
+    typedef enum logic [4:0] {
+        ST_IDLE,           // asteapta enable
+        ST_START,          // genereaza conditia start
+        ST_ADDR_WRITE,     // trimite adresa + bitul de write (0)
+        ST_ACK_ADDR_WRITE, // asteapta ack de la slave
+        ST_REGISTER,       // trimite adresa registrului 
+        ST_ACK_REGISTER,   // asteapta ack
+        ST_RESTART,        // doar la citire
+        ST_ADDR_READ,      // trimite adresa + bitul de read (1)
+        ST_ACK_ADDR_READ,  // asteapta ack
+        ST_READ_BYTE,      // citeste un byte
+        ST_MASTER_ACK,     // master da ack dupa primul byte
+        ST_MASTER_NACK,    // master da nach dupa al doilea byte
+        ST_STOP,           // genereaza conditia stop
+        ST_DONE            // seteaza done si se intoarce in idle
+    } state_t;
 
-logic [7:0] shift_reg;
-logic [2:0] bit_counter;
-logic [3:0] byte_counter;
-logic [1:0] phase; // 0=high, 1=falling, 2=low, 3=rising
-logic [15:0] rdata; // buffer intern unde se adun? cei 2 bytes citi?i, înainte de a-i pune pe portul data_out
+    state_t state;
 
-// Open-drain control
-// oe: output enable
-// oe = 1 ? drive 0 pe magistral?
-// oe = 0 ? release (high-Z)
-logic sda_oe;
-logic scl_oe;
+    // Registru folosit pentru transmiterea bitilor
+    logic [7:0] shift_reg;
 
-assign sda = sda_oe ? 1'b0 : 1'bz;
-assign scl = scl_oe ? 1'b0 : 1'bz;
-    
-always @(posedge clk) begin
-    if (reset) begin
-        i2c_state <= IDLE;
-        bit_counter <= 3'd0;
-        byte_counter <= 4'd0;
-        phase <= 2'd0;
-        shift_reg <= 8'd0;
-        rdata <= 16'd0;
-        busy <= 1'b0;
-        done <= 1'b0;
-        ack_error <= 1'b0;
-        sda_oe <= 1'b0; 
-        scl_oe <= 1'b0; 
-        data_out <= 16'd0;
-    end else begin
-        done <= 1'b0;
-        phase <= phase + 1;
-        case (phase)
-            2'd0: scl_oe <= 1'b0;   // SCL high (release)
-            2'd1: scl_oe <= 1'b1;   // falling ? drive low
-            2'd2: scl_oe <= 1'b1;   // SCL low
-            2'd3: scl_oe <= 1'b0;   // rising ? release
-        endcase
-        case (i2c_state)
-            IDLE: begin
-                busy <= 1'b0;
-                sda_oe <= 1'b0;
-                scl_oe <= 1'b0;
-                phase <= 2'd0;
-                if (enable) begin
-                    busy <= 1'b1;
-                    ack_error <= 1'b0;
-                    shift_reg <= {addr, rw};
-                    bit_counter <= 3'd7;
-                    byte_counter <= num_bytes;
-                    i2c_state <= START;
-                end
-            end
-            START: begin
-                // conditie START: SDA low cat timp SCL high
-                if (phase == 2'd0) begin
-                    sda_oe <= 1'b1; // SDA = 0
-                end
-                if (phase == 2'd3) begin
-                    i2c_state <= ADDR;
-                    phase <= 2'd0;
-                end
-            end
-            ADDR: begin
-                // trimitem adresa + R/W
-                if (phase == 2'd2) begin  // pe SCL low punem bitul
-                    // bit = 0 ? drive low (oe=1)
-                    // bit = 1 ? release (oe=0)
-                    sda_oe <= ~shift_reg[bit_counter];
-                end
-                if (phase == 2'd3) begin
-                    if (bit_counter == 0) begin
-                        i2c_state <= ACK_ADDR;
-                        bit_counter <= 3'd7;
-                    end else begin
-                        bit_counter <= bit_counter - 1;
-                    end
-                end
-             end
-             ACK_ADDR: begin
-                sda_oe <= 1'b0; // eliberam SDA (citim ACK)
-                if (phase == 2'd0) begin // e?antion?m pe SCL high
-                    if (sda == 1'b1)
-                        ack_error <= 1'b1;
-                end
-                if (phase == 2'd3) begin
-                    if (rw)
-                        i2c_state <= READ_DATA;
-                    else begin
-                        i2c_state <= WRITE_DATA;
-                        shift_reg <= data_in;
-                        bit_counter <= 3'd7;
-                    end
-                end
-             end
-             WRITE_DATA: begin
-                    if (phase == 2'd2) begin
-                        sda_oe <= ~shift_reg[bit_counter];
-                    end
-                    if (phase == 2'd3) begin
-                        if (bit_counter == 0) begin
-                            i2c_state <= ACK_WRITE;
-                        end else begin
-                            bit_counter <= bit_counter - 1;
+    // Registru folosit pentru receptionarea unui byte
+    logic [7:0] read_shift;
+
+    // Registrul I2C
+    logic [7:0] register_reg;
+
+    // Date pentru eventual WRITE
+    logic [15:0] write_data_reg;
+
+    // Buffer pentru cei 2 bytes cititi
+    logic [15:0] rdata;
+
+    // Indexul bitului transmis/citit
+    logic [2:0] bit_counter;
+
+    // 0 = urmeaza primul byte (MSB)
+    // 1 = urmeaza al doilea byte (LSB)
+    logic read_second_byte;
+
+    // PHASE
+    // phase = 0: SCL LOW / pregatire
+    // phase = 1: SDA este stabilit
+    // phase = 2: SCL HIGH -> aici citim SDA
+    // phase = 3: terminam bitul si trecem la urmatorul
+
+    logic [1:0] phase;
+
+    // OPEN DRAIN
+
+    logic sda_oe;
+    logic scl_oe;
+
+    // oe = 1 -> drive LOW
+    // oe = 0 -> release
+
+    assign sda = sda_oe ? 1'b0 : 1'bz;
+    assign scl = scl_oe ? 1'b0 : 1'bz;
+
+    always @(posedge clk) begin
+        if (reset) begin
+            state <= ST_IDLE;
+            phase <= 2'd0;
+            shift_reg <= 8'd0;
+            read_shift <= 8'd0;
+            register_reg <= 8'd0;
+            write_data_reg <= 16'd0;
+            rdata <= 16'd0;
+            bit_counter <= 3'd0;
+            read_second_byte <= 1'b0;
+            data_out <= 16'd0;
+            busy <= 1'b0;
+            done <= 1'b0;
+            ack_error <= 1'b0;
+            ack_debug <= 2'd0;
+            sda_oe <= 1'b0;
+            scl_oe <= 1'b0;
+        end
+        else begin
+            // done este un puls de un i2c_tick
+            done <= 1'b0;
+            if (i2c_tick) begin
+                case (state)
+                    ST_IDLE: begin
+                        busy <= 1'b0;
+                        sda_oe <= 1'b0;
+                        scl_oe <= 1'b0;
+                        phase <= 2'd0;
+                        if (enable) begin
+                            busy <= 1'b1;
+                            ack_error <= 1'b0;
+                            ack_debug <= 2'd0;
+                            rdata <= 16'd0;
+                            register_reg <= reg_addr;
+                            write_data_reg <= data_in;
+                            // Vom citi intotdeauna 2 bytes
+                            read_second_byte <= 1'b0;
+                            // START va fi urmat de: address + WRITE
+                            shift_reg <= {addr,1'b0};
+                            bit_counter <= 3'd7;
+                            state <= ST_START;
                         end
                     end
-             end
-             ACK_WRITE: begin
-                sda_oe <= 1'b0;  // eliberam
-                if (phase == 2'd0) begin
-                    if (sda == 1'b1)
-                        ack_error <= 1'b1;
-                end
-                if (phase == 2'd3) begin
-                    if (byte_counter <= 1) begin
-                        i2c_state <= STOP;
-                    end else begin
-                        byte_counter  <= byte_counter - 1;
-                        shift_reg <= data_in;  // urm?torul byte
-                        bit_counter <= 3'd7;
-                        i2c_state <= WRITE_DATA;
+                    ST_START: begin
+                        // SCL trebuie sa fie HIGH
+                        scl_oe <= 1'b0;
+                        case (phase)
+                            // SDA HIGH
+                            2'd0: begin
+                                sda_oe <= 1'b0;
+                            end
+                            // SDA HIGH -> LOW
+                            // SCL HIGH
+                            2'd1: begin
+                                sda_oe <= 1'b1;
+                            end
+                            // Mentin SDA LOW
+                            2'd2: begin
+                                sda_oe <= 1'b1;
+                            end
+                            2'd3: begin
+                                sda_oe <= 1'b1;
+                                state <= ST_ADDR_WRITE;
+                                bit_counter <= 3'd7;
+                            end
+                        endcase
                     end
-                end
-             end
-             // Repeated START (write pointer + read)
-             RESTART: begin
-                if (phase == 2'd0) begin
-                    sda_oe <= 1'b0;   // SDA high
-                end
-                if (phase == 2'd1) begin
-                    sda_oe <= 1'b1;  // SDA low ? repeated start
-                end
-                if (phase == 2'd3) begin
-                    shift_reg <= {addr, 1'b1}; // address + read
-                    bit_counter <= 3'd7;
-                    i2c_state <= ADDR;
-                end
-             end
-             READ_DATA: begin
-                sda_oe <= 1'b0;    // eliberam (slave drive)
-                if (phase == 2'd0) begin  // e?antion?m pe SCL high
-                    shift_reg <= {shift_reg[6:0], sda};
-                end
-                if (phase == 2'd3) begin
-                    if (bit_counter == 0) begin
-                        // salv?m byte-ul
-                        if (byte_counter == num_bytes)
-                            rdata[15:8] <= shift_reg;
-                        else
-                            rdata[7:0]  <= shift_reg;
-                        if (byte_counter <= 1)
-                            i2c_state <= NACK;
-                        else
-                            i2c_state <= ACK_READ;
-                    end else begin
-                        bit_counter <= bit_counter - 1;
+                    ST_ADDR_WRITE: begin
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // Punem bitul pe SDA
+                            2'd1: begin
+                                scl_oe <= 1'b1;
+                                sda_oe <= ~shift_reg[bit_counter];
+                            end
+                            // SCL HIGH
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Terminarea bitului
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                if (bit_counter == 0) begin
+                                    bit_counter <= 3'd7;
+                                    state <= ST_ACK_ADDR_WRITE;
+                                end
+                                else begin
+                                    bit_counter <= bit_counter - 1'b1;
+                                end
+                            end
+                        endcase
                     end
-                end
-             end
-             ACK_READ: begin
-                // Master ACK (drive low)
-                if (phase == 2'd2)
-                    sda_oe <= 1'b1;
+                    ST_ACK_ADDR_WRITE: begin
+                        // Slave-ul conduce SDA
+                        sda_oe <= 1'b0;
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // SCL HIGH
+                            2'd1: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Citim ACK
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                                if (sda == 1'b1) begin
+                                    ack_error <= 1'b1;
+                                    ack_debug <= 2'd1;
+                                end
+                            end
+                            // ACK terminat
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                shift_reg <= register_reg;
+                                bit_counter <= 3'd7;
+                                state <= ST_REGISTER;
+                            end
+                        endcase
+                    end
+                    ST_REGISTER: begin
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // Punem bitul
+                            2'd1: begin
+                                scl_oe <= 1'b1;
+                                sda_oe <= ~shift_reg[bit_counter];
+                            end
+                            // SCL HIGH
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Terminam bitul
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                if (bit_counter == 0) begin
+                                    bit_counter <= 3'd7;
+                                    state <= ST_ACK_REGISTER;
+                                end
+                                else begin
+                                    bit_counter <= bit_counter - 1'b1;
+                                end
+                            end
+                        endcase
+                    end
+                    ST_ACK_REGISTER: begin
+                        // Eliberam SDA
+                        sda_oe <= 1'b0;
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // Pregatim SCL HIGH
+                            2'd1: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Citim ACK
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                                if (sda == 1'b1) begin
+                                    ack_error <= 1'b1;
+                                    ack_debug <= 2'd2;
+                                end
+                            end
+                            // ACK terminat
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                if (rw) begin
+                                    state <= ST_RESTART;
+                                end
+                                else begin
+                                    state <= ST_STOP;
+                                end
+                            end
+                        endcase
+                    end
+                    ST_RESTART: begin
+                        // SCL HIGH
+                        scl_oe <= 1'b0;
+                        case (phase)
+                            // SDA HIGH
+                            2'd0: begin
+                                sda_oe <= 1'b0;
+                            end
+                            // SDA HIGH -> LOW
+                            // SCL HIGH
+                            2'd1: begin
+                                sda_oe <= 1'b1;
+                            end
+                            // Mentin SDA LOW
+                            2'd2: begin
+                                sda_oe <= 1'b1;
+                            end
+                            // Pregatim adresa READ
+                            2'd3: begin
+                                shift_reg <= {addr,1'b1};
+                                bit_counter <= 3'd7;
+                                state <= ST_ADDR_READ;
+                            end
+                        endcase
+                    end
+                    ST_ADDR_READ: begin
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // Punem bitul
+                            2'd1: begin
+                                scl_oe <= 1'b1;
+                                sda_oe <= ~shift_reg[bit_counter];
+                            end
+                            // SCL HIGH
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Terminam bitul
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                if (bit_counter == 0) begin
+                                    bit_counter <= 3'd7;
+                                    state <= ST_ACK_ADDR_READ;
+                                end
+                                else begin
+                                    bit_counter <= bit_counter - 1'b1;
+                                end
+                            end
+                        endcase
+                    end
+                    ST_ACK_ADDR_READ: begin
+                        // Eliberam SDA
+                        sda_oe <= 1'b0;
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // SCL HIGH
+                            2'd1: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Citim ACK
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                                if (sda == 1'b1) begin
+                                    ack_error <= 1'b1;
+                                    ack_debug <= 2'd3;
+                                end
+                            end
+                            // ACK terminat
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                read_shift <= 8'd0;
+                                bit_counter <= 3'd7;
+                                read_second_byte <= 1'b0;
+                                state <= ST_READ_BYTE;
+                            end
+                        endcase
+                    end
+                    ST_READ_BYTE: begin
+                        // Slave-ul conduce SDA
+                        sda_oe <= 1'b0;
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // SCL LOW
+                            2'd1: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // SCL HIGH
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                                read_shift[bit_counter] <= sda;
+                            end
+                            // Terminam bitul
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                if (bit_counter == 0) begin
+                                    // Byte-ul este complet
+                                    // read_shift contine deja toti cei 8 biti
+                                    if (!read_second_byte) begin
+                                        // Primul byte = MSB
+                                        rdata[15:8] <= read_shift;
+                                        // Urmeaza al doilea byte
+                                        read_second_byte <= 1'b1;
+                                        bit_counter <= 3'd7;
+                                        state <= ST_MASTER_ACK;
+                                    end
+                                    else begin
+                                        // Al doilea byte = LSB
+                                        rdata[7:0] <= read_shift;
+                                        state <= ST_MASTER_NACK;
+                                    end
+                                end
+                                else begin
+                                    bit_counter <= bit_counter - 1'b1;
+                                end
+                            end
+                        endcase
+                    end
+                    ST_MASTER_ACK: begin
+                        // ACK = SDA LOW
+                        sda_oe <= 1'b1;
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // SCL HIGH
+                            2'd1: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Mentinem ACK
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Terminam ACK
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                read_shift <= 8'd0;
+                                bit_counter <= 3'd7;
+                                state <= ST_READ_BYTE;
+                            end
+                        endcase
+                    end
+                    ST_MASTER_NACK: begin
+                        // NACK = SDA HIGH
+                        sda_oe <= 1'b0;
+                        case (phase)
+                            // SCL LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                            end
+                            // SCL HIGH
+                            2'd1: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Mentinem NACK
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                            end
+                            // Terminam NACK
+                            2'd3: begin
+                                scl_oe <= 1'b1;
+                                state <= ST_STOP;
+                            end
+                        endcase
+                    end
+                    ST_STOP: begin
+                        case (phase)
+                            // SCL LOW + SDA LOW
+                            2'd0: begin
+                                scl_oe <= 1'b1;
+                                sda_oe <= 1'b1;
+                            end
+                            // SCL HIGH + SDA LOW
+                            2'd1: begin
+                                scl_oe <= 1'b0;
+                                sda_oe <= 1'b1;
+                            end
+                            // SDA LOW -> HIGH
+                            // SCL HIGH
+                            2'd2: begin
+                                scl_oe <= 1'b0;
+                                sda_oe <= 1'b0;
+                            end
+                            // Magistrala libera
+                            2'd3: begin
+                                scl_oe <= 1'b0;
+                                sda_oe <= 1'b0;
+                                state <= ST_DONE;
+                            end
+                        endcase
+                    end
+                    ST_DONE: begin
+                        busy <= 1'b0;
+                        done <= 1'b1;
+                        data_out <= rdata;
+                        state <= ST_IDLE;
+                    end
+                    default: begin
+                        state <= ST_IDLE;
+                        busy <= 1'b0;
+                        sda_oe <= 1'b0;
+                        scl_oe <= 1'b0;
+                        phase <= 2'd0;
+                    end
+                endcase
+                // AVANSARE PHASE
                 if (phase == 2'd3) begin
-                    byte_counter <= byte_counter - 1;
-                    bit_counter  <= 3'd7;
-                    i2c_state    <= READ_DATA;
+                    phase <= 2'd0;
                 end
-             end
-             NACK: begin
-                // Master NACK (release)
-                if (phase == 2'd2)
-                    sda_oe <= 1'b0;
-                if (phase == 2'd3)
-                    i2c_state <= STOP;
-             end
-             STOP: begin
-                // STOP: SDA low ? SCL high ? SDA high
-                if (phase == 2'd0) begin
-                    sda_oe <= 1'b1; // SDA = 0
+                else begin
+                    phase <= phase + 1'b1;
                 end
-                if (phase == 2'd1) begin
-                    scl_oe <= 1'b0;   // SCL high
-                end
-                if (phase == 2'd2) begin
-                    sda_oe <= 1'b0; // SDA high ? STOP
-                end
-                if (phase == 2'd3) begin
-                    i2c_state <= DONE_ST;
-                end
-             end
-             DONE_ST: begin
-                done <= 1'b1;
-                busy <= 1'b0;
-                data_out <= rdata;
-                i2c_state <= IDLE;
-             end
-             default: i2c_state <= IDLE;    
-        endcase
+            end
+        end
     end
-end
 endmodule

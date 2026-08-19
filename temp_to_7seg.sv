@@ -1,35 +1,26 @@
 `timescale 1ns / 1ps
 
 module temp_to_7seg (
-    input  logic [15:0] temp,
-    output logic [3:0] dig3,          // zeci
-    output logic [3:0] dig2,          // unit??i
-    output logic [3:0] dig1,          // zecimale
-    output logic [3:0] dig0,          // 'C'
-    output logic dp,            // decimal point (pe digit 2)
-    output logic led_neg        // LED aprins la temperatur? negativ?
+    input logic [15:0] temp,
+
+    output logic [3:0] dig3,  // zeci
+    output logic [3:0] dig2,  // unitati
+    output logic [3:0] dig1,  // zecimi
+    output logic [3:0] dig0,  // C
+    output logic dp           // punct dupa unitati
 );
 
-    logic [15:0] abs_temp;
+    always_comb begin
 
-    always @(*) begin
-        if (temp[15] == 1'b1) begin
-            led_neg  = 1'b1;
-            abs_temp = -temp;
-        end
-        else begin
-            led_neg  = 1'b0;
-            abs_temp = temp;
-        end
+        dig3 = (temp / 100) % 10;
+        dig2 = (temp / 10)  % 10;
+        dig1 = temp % 10;
 
-        // Extragem digi?ii
-        dig3 = (abs_temp / 100) % 10;
-        dig2 = (abs_temp / 10)  % 10;
-        dig1 =  abs_temp % 10;
-        dig0 = 4'hC;                   // litera C
+        dig0 = 4'hC;
 
-        // Punctul zecimal pe digitul 2
-        dp = 1'b1;
+        // DP active-low
+        dp = 1'b0;
+
     end
 
 endmodule
