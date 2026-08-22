@@ -101,5 +101,5 @@ Au fost adăugate stări dedicate (ST_REGISTER, ST_RESTART, ST_MASTER_ACK, ST_MA
 S-a introdus semnalul ack_debug pe 2 biți.   
 La nivel de sistem (temp_top) s-a adăugat citirea periodică cu timeout, conversia temperaturii, generarea string-ului ASCII pentru UART și maparea pe afișajul 7-segmente + LED-uri de debug.
 
-# Integrare Logger
-<img width="825" height="801" alt="image" src="https://github.com/user-attachments/assets/dc1bc9b3-8949-40b1-83be-ac5ef01e9ca7" />
+# Integrare Logger și contor
+<img width="825" height="414" alt="image" src="https://github.com/user-attachments/assets/11652af3-2ba0-4e7d-b1d0-db53e4c5364f" />
