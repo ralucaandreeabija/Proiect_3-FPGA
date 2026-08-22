@@ -24,21 +24,21 @@ module message(
 );
 
     localparam BYTES = 64;
-    localparam MENU_BYTES = 128;
+    localparam MENU_BYTES = 160;
 
     localparam LEN_INC = 29;
     localparam LEN_DEC = 29;
     localparam LEN_RESET = 31;
     localparam LEN_STATUS = 26;
     localparam LEN_ERROR = 20;
-    localparam LEN_MENU = 116;
+    localparam LEN_MENU = 135;
     localparam LEN_BTN_INC = 29;
     localparam LEN_BTN_DEC = 29;
     localparam LEN_BTN_RESET = 31;
     localparam LEN_WELCOME = 50;
-    localparam LEN_OVERFLOW = 35;
-    localparam LEN_UNDERFLOW = 36;
-    localparam LEN_TEMP = 25;
+    localparam LEN_OVERFLOW = 28;
+    localparam LEN_UNDERFLOW = 29;
+    localparam LEN_TEMP = 30;
     
     // O singura trimitere Welcome, dupa ~5 s de la reset
     localparam WELCOME_DELAY = 28'd500_000_000;
@@ -65,8 +65,8 @@ module message(
     logic [7:0] bytes_left;
     logic [7:0] error_char;
     logic welcome_sent = 1'b0;
-    logic [27:0]  welcome_cnt  = 28'd0;
-    logic [47:0]  hex_ascii;
+    logic [27:0] welcome_cnt  = 28'd0;
+    logic [47:0] hex_ascii;
     logic overflow_pending;
     logic underflow_pending;
 
@@ -185,6 +185,7 @@ module message(
                                             "D/d - Decrement counter", 8'h0D, 8'h0A,
                                             "R/r - Reset counter", 8'h0D, 8'h0A,
                                             "S/s - Show status", 8'h0D, 8'h0A,
+                                            "T/t - Temperature", 8'h0D, 8'h0A,
                                             "? - Show menu", 8'h0D, 8'h0A,
                                             {(MENU_BYTES-LEN_MENU){8'h00}}};
                             bytes_left <= LEN_MENU;
@@ -211,12 +212,12 @@ module message(
                             state <= SEND;
                         end
                         MSG_OVERFLOW: begin
-                            buffer <= {"[SYS] OVERFLOW (0xFFFF -> 0x0000)", 8'h0D, 8'h0A,{(BYTES-LEN_OVERFLOW){8'h00}}};
+                            buffer <= {"[SYS] OVERFLOW (9999 -> 0)", 8'h0D, 8'h0A,{(BYTES-LEN_OVERFLOW){8'h00}}};
                             bytes_left <= LEN_OVERFLOW;
                             state <= SEND;
                         end
                         MSG_UNDERFLOW: begin
-                            buffer <= {"[SYS] UNDERFLOW (0x0000 -> 0xFFFF)", 8'h0D, 8'h0A,{(BYTES-LEN_UNDERFLOW){8'h00}}};
+                            buffer <= {"[SYS] UNDERFLOW (0 -> 9999)", 8'h0D, 8'h0A,{(BYTES-LEN_UNDERFLOW){8'h00}}};
                             bytes_left <= LEN_UNDERFLOW;
                             state <= SEND;
                         end
@@ -226,7 +227,7 @@ module message(
                             state <= SEND;
                         end
                         MSG_TEMPERATURE: begin
-                            buffer <= {"[SYS] Temperature: ", temp_ascii, " C", 8'h0D, 8'h0A,{(BYTES-LEN_TEMP){8'h00}}};                            
+                            buffer <= {"[SYS] Temperature: ", temp_ascii, "C", 8'h0D, 8'h0A,{(BYTES-LEN_TEMP){8'h00}}};                            
                             bytes_left <= LEN_TEMP;
                             state <= SEND;
                         end

@@ -7,7 +7,11 @@ module logger_top(
     input logic btn_reset,
     input logic rx,
     output logic tx,
-    output logic [15:0] leds
+    output logic [15:0] leds,
+    output logic [15:0] counter_out,
+    // --- porturi noi pentru temperatur? ---
+    output logic temp_command,
+    input logic [39:0] temp_ascii
 );
 
     logic inc_command, dec_command, reset_command, status_command, menu_command, error_command;
@@ -19,6 +23,7 @@ module logger_top(
     logic overflow, underflow;
     logic [15:0] counter;
     assign leds = counter;
+    assign counter_out = counter;
 
     logic [7:0] received_data;
     logic data_valid;
@@ -49,8 +54,8 @@ module logger_top(
     end
     assign pwr_active = (pwr_cnt < 8'd32); // ~32 cicluri de reset la start
 
-    // sys_reset  ? FIFO, UART, command_interpreter (pwr + buton)
-    // msg_reset  ? doar pwr (ca Welcome s? se retrimit? la power-up, dar NU la fiecare ap?sare a butonului de reset)
+    // sys_reset  -> FIFO, UART, command_interpreter (pwr + buton)
+    // msg_reset  -> doar pwr (ca Welcome s? se retrimit? la power-up, dar NU la fiecare ap?sare a butonului de reset)
     
     assign sys_reset = pwr_active | btn_reset_pulse;
     assign msg_reset = pwr_active;
@@ -132,7 +137,8 @@ module logger_top(
         .status_command(status_command),
         .menu_command(menu_command),
         .error_command(error_command),
-        .unknown_command(unknown_command)
+        .unknown_command(unknown_command),
+        .temp_command(temp_command)
     );
 
     contor_binar counter_inst (
@@ -145,7 +151,7 @@ module logger_top(
         .underflow(underflow)
     );
 
-    // msg_reset = doar pwr ? Welcome o dat? la pwrnire
+    // msg_reset = doar pwr -> Welcome o dat? la pornire
     // Butonul RESET trimite [BTN] RESET, f?r? a re-trimite Welcome
     
     message message_inst (
@@ -159,6 +165,8 @@ module logger_top(
         .menu_command(menu_command),
         .error_command(error_command),
         .unknown_command(unknown_command),
+        .temp_command(temp_command),
+        .temp_ascii(temp_ascii),
         .btn_inc_pulse(btn_inc_pulse),
         .btn_dec_pulse(btn_dec_pulse),
         .btn_reset_pulse(btn_reset_pulse),
